@@ -7,6 +7,12 @@ import numpy as np
 import matplotlib.pyplot as plt 
 import warnings
 from opacus.validators import ModuleValidator
+from torchvision.datasets import CIFAR10
+from torchvision import models
+from opacus import PrivacyEngine
+import numpy as np
+from opacus.utils.batch_memory_manager import BatchMemoryManager
+import pickle
 
 warnings.simplefilter("ignore")
 torch.cuda.empty_cache()
@@ -33,7 +39,6 @@ transform_test = transforms.Compose([
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
-from torchvision.datasets import CIFAR10
 
 DATA_ROOT = '../cifar10'
 
@@ -88,14 +93,6 @@ class convNet(nn.Module):
         return x
 
 
-
-# from torchsummary import summary
-# modelp = convNet()
-# summary(modelp, (3, 32, 32))
-
-
-from torchvision import models
-
 model_res = models.resnet18(num_classes=10)
 model_res = ModuleValidator.fix(model_res)
 ModuleValidator.validate(model_res, strict=False)
@@ -126,7 +123,6 @@ optimizer=torch.optim.SGD(model_res.parameters(),lr=LR,momentum=MOMENTUM)
 def accuracy(preds, labels):
     return (preds == labels).mean()
 
-from opacus import PrivacyEngine
 
 privacy_engine = PrivacyEngine()
 
@@ -142,8 +138,6 @@ model_res, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
 
 print(f"Using sigma={optimizer.noise_multiplier} and C={MAX_GRAD_NORM}")
 
-import numpy as np
-from opacus.utils.batch_memory_manager import BatchMemoryManager
 
 
 def train(model, train_loader, optimizer, epoch, device):
@@ -198,7 +192,6 @@ for epoch in range(EPOCHS):
     loss_list.append(epoch_loss)
     acc_list.append(epoch_acc)
 
-import pickle
 with open("losses", "wb") as fp:
     pickle.dump(loss_list, fp)
 with open("accs", "wb") as fp:

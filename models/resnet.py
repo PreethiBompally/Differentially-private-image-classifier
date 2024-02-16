@@ -7,6 +7,13 @@ import numpy as np
 import matplotlib.pyplot as plt 
 import warnings
 from opacus.validators import ModuleValidator
+from torchvision import models
+from datetime import datetime
+from opacus import PrivacyEngine
+from torchvision.datasets import CIFAR10
+import numpy as np
+import pickle
+from opacus.utils.batch_memory_manager import BatchMemoryManager
 
 warnings.simplefilter("ignore")
 torch.cuda.empty_cache()
@@ -33,8 +40,6 @@ transform_test = transforms.Compose([
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
-from torchvision.datasets import CIFAR10
-
 DATA_ROOT = '../cifar10'
 
 train_dataset = CIFAR10(
@@ -55,11 +60,39 @@ test_loader = torch.utils.data.DataLoader(
 )
 
 
+class convNet(nn.Module):
+    def __init__(self):
+        super(convNet,self).__init__()
+        self.conv1=nn.Conv2d(in_channels=3,out_channels=16,kernel_size=3,stride=1,padding=1)
+        self.conv2=nn.Conv2d(in_channels=16,out_channels=32,kernel_size=3,stride=1,padding=1)
+        self.conv3=nn.Conv2d(in_channels=32,out_channels=64,kernel_size=3,stride=1,padding=1)
+        self.conv4=nn.Conv2d(in_channels=64,out_channels=128,kernel_size=3,stride=1,padding=1)
+        self.conv5=nn.Conv2d(in_channels=128,out_channels=256,kernel_size=3,stride=1,padding=1)
+        self.b1=nn.GroupNorm(4,16)
+        self.b2=nn.GroupNorm(16,64)
+        self.b3=nn.GroupNorm(64,256)
+        self.pool=nn.MaxPool2d(kernel_size=2,stride=2)  
+
+        self.dropout=nn.Dropout(0.1)
+        self.fc1=nn.Linear(256,128)
+        self.fc2=nn.Linear(128,64)
+        self.out=nn.Linear(64,10)
 
 
+    def forward(self,x):
+        x=self.pool(F.relu(self.b1(self.conv1(x))))
+        x=self.pool(F.relu(self.conv2(x)))
+        x=self.pool(F.relu(self.b2(self.conv3(x))))
+        x=self.pool(F.relu(self.conv4(x)))
+        x=self.pool(F.relu(self.b3(self.conv5(x))))
+        x=x.view(-1,256)
+        x = self.dropout(x)
+        x=self.dropout(F.relu(self.fc1(x)))
+        x=self.dropout(F.relu(self.fc2(x)))
+        x=self.out(x)   
+        return x
 
-from torchvision import models
-from datetime import datetime
+
 model_res = models.resnet18(num_classes=10)
 model_res = ModuleValidator.fix(model_res)
 ModuleValidator.validate(model_res, strict=False)
@@ -90,8 +123,6 @@ optimizer=torch.optim.SGD(model_res.parameters(),lr=LR,momentum=MOMENTUM)
 def accuracy(preds, labels):
     return (preds == labels).mean()
 
-from opacus import PrivacyEngine
-
 privacy_engine = PrivacyEngine()
 
 model_res, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
@@ -106,8 +137,6 @@ model_res, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
 
 print(f"Using sigma={optimizer.noise_multiplier} and C={MAX_GRAD_NORM}")
 
-import numpy as np
-from opacus.utils.batch_memory_manager import BatchMemoryManager
 
 
 def train(model, train_loader, optimizer, epoch, device):
@@ -164,7 +193,7 @@ for epoch in range(EPOCHS):
     loss_list.append(epoch_loss)
     acc_list.append(epoch_acc)
 
-import pickle
+
 with open("losses", "wb") as fp:
     pickle.dump(loss_list, fp)
 with open("accs", "wb") as fp:
