@@ -1,0 +1,204 @@
+import torch
+from torchvision import datasets,transforms
+from torch.utils.data import DataLoader, SubsetRandomSampler
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np 
+import matplotlib.pyplot as plt 
+import warnings
+from opacus.validators import ModuleValidator
+
+warnings.simplefilter("ignore")
+torch.cuda.empty_cache()
+MAX_GRAD_NORM = 1.0
+EPSILON = 3.0
+DELTA = 1e-5
+EPOCHS = 100
+LR = 1e-2
+MOMENTUM =0.9
+
+BATCH_SIZE = 32
+MAX_PHYSICAL_BATCH_SIZE = 64
+
+transform_train = transforms.Compose([
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(10),
+    transforms.ToTensor(),
+    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+])
+
+# Normalize the test set same as training set without augmentation
+transform_test = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+])
+
+from torchvision.datasets import CIFAR10
+
+DATA_ROOT = '../cifar10'
+
+train_dataset = CIFAR10(
+    root=DATA_ROOT, train=True, download=True, transform=transform_train)
+
+train_loader = torch.utils.data.DataLoader(
+    train_dataset,
+    batch_size=BATCH_SIZE,
+)
+
+test_dataset = CIFAR10(
+    root=DATA_ROOT, train=False, download=True, transform=transform_test)
+
+test_loader = torch.utils.data.DataLoader(
+    test_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=False,
+)
+
+
+
+
+
+from torchvision import models
+from datetime import datetime
+model_res = models.resnet18(num_classes=10)
+model_res = ModuleValidator.fix(model_res)
+ModuleValidator.validate(model_res, strict=False)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def weight_init_normal(m):
+    classname=m.__class__.__name__
+    if classname.find('Linear')!=-1:
+        n = m.in_features
+        y = (1.0/np.sqrt(n))
+        m.weight.data.normal_(0, y)
+        m.bias.data.fill_(0)
+
+model=convNet()
+model.apply(weight_init_normal)
+use_cuda=True
+if use_cuda and torch.cuda.is_available():
+    model.cuda()
+    model_res.to(device)
+print(model_res,'\n\n\n\n','On GPU : ',use_cuda and torch.cuda.is_available())
+
+
+ModuleValidator.validate(model, strict=False)
+
+criterion=nn.CrossEntropyLoss()
+optimizer=torch.optim.SGD(model_res.parameters(),lr=LR,momentum=MOMENTUM)
+
+def accuracy(preds, labels):
+    return (preds == labels).mean()
+
+from opacus import PrivacyEngine
+
+privacy_engine = PrivacyEngine()
+
+model_res, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
+    module=model_res,
+    optimizer=optimizer,
+    data_loader=train_loader,
+    epochs=EPOCHS,
+    target_epsilon=EPSILON,
+    target_delta=DELTA,
+    max_grad_norm=MAX_GRAD_NORM,
+)
+
+print(f"Using sigma={optimizer.noise_multiplier} and C={MAX_GRAD_NORM}")
+
+import numpy as np
+from opacus.utils.batch_memory_manager import BatchMemoryManager
+
+
+def train(model, train_loader, optimizer, epoch, device):
+    print(datetime.now())
+    model.train()
+    criterion = nn.CrossEntropyLoss()
+
+    losses = []
+    top1_acc = []
+    
+    with BatchMemoryManager(
+        data_loader=train_loader, 
+        max_physical_batch_size=MAX_PHYSICAL_BATCH_SIZE, 
+        optimizer=optimizer
+    ) as memory_safe_data_loader:
+
+        for i, (images, target) in enumerate(memory_safe_data_loader):   
+            optimizer.zero_grad()
+            images = images.to(device)
+            target = target.to(device)
+
+            # compute output
+            output = model(images)
+            loss = criterion(output, target)
+
+            preds = np.argmax(output.detach().cpu().numpy(), axis=1)
+            labels = target.detach().cpu().numpy()
+
+            # measure accuracy and record loss
+            acc = accuracy(preds, labels)
+
+            losses.append(loss.item())
+            top1_acc.append(acc)
+
+            loss.backward()
+            optimizer.step()
+
+        
+    epsilon = privacy_engine.get_epsilon(DELTA)
+    
+    print(
+        f"\tTrain Epoch: {epoch} \t"
+        f"Loss: {np.mean(losses):.6f} "
+        f"Acc@1: {np.mean(top1_acc) * 100:.6f} "
+        f"(ε = {epsilon:.2f}, δ = {DELTA})"
+    )
+    print(datetime.now())
+    return np.mean(losses), np.mean(top1_acc)* 100
+
+loss_list =[]
+acc_list = []
+for epoch in range(EPOCHS):
+    epoch_loss,epoch_acc = train(model_res, train_loader, optimizer, epoch + 1, device)
+    loss_list.append(epoch_loss)
+    acc_list.append(epoch_acc)
+
+import pickle
+with open("losses", "wb") as fp:
+    pickle.dump(loss_list, fp)
+with open("accs", "wb") as fp:
+    pickle.dump(acc_list, fp)
+
+
+
+def test(model, test_loader, device):
+    model.eval()
+    criterion = nn.CrossEntropyLoss()
+    losses = []
+    top1_acc = []
+
+    with torch.no_grad():
+        for images, target in test_loader:
+            images = images.to(device)
+            target = target.to(device)
+
+            output = model(images)
+            loss = criterion(output, target)
+            preds = np.argmax(output.detach().cpu().numpy(), axis=1)
+            labels = target.detach().cpu().numpy()
+            acc = accuracy(preds, labels)
+
+            losses.append(loss.item())
+            top1_acc.append(acc)
+
+    top1_avg = np.mean(top1_acc)
+
+    print(
+        f"\tTest set:"
+        f"Loss: {np.mean(losses):.6f} "
+        f"Acc: {top1_avg * 100:.6f} "
+    )
+    return np.mean(top1_acc)
+
+top1_acc = test(model_res, test_loader, device)
